@@ -14,7 +14,11 @@ def test_live_oracle_connection_and_discovery():
     if not settings.is_configured:
         pytest.skip("Live Oracle Database credentials not configured in environment (.env). Skipping.")
 
-    conn_mgr = OracleConnectionManager(settings)
+    try:
+        conn_mgr = OracleConnectionManager(settings)
+    except RuntimeError as r_err:
+        pytest.skip(f"Oracle Thick client not initialized ({r_err}). Run with LD_LIBRARY_PATH set.")
+
     status = conn_mgr.test_connection()
     if not status.success:
         pytest.skip(f"Live Oracle Database unreachable: {status.error_message}. Skipping integration test.")

@@ -126,9 +126,20 @@ with tab_source:
     col_schema, col_table = st.columns(2)
 
     with col_schema:
+        schema_options = (
+            schemas
+            if schemas
+            else [settings.default_schema, settings.oracle_user.upper() if settings.oracle_user else "HR"]
+        )
+        schema_default_idx = (
+            schema_options.index(settings.default_schema.upper())
+            if settings.default_schema.upper() in schema_options
+            else 0
+        )
         selected_schema = st.selectbox(
             "Select Schema",
-            options=schemas if schemas else [settings.oracle_user.upper() if settings.oracle_user else "HR"],
+            options=schema_options,
+            index=schema_default_idx,
             help="Database schema (owner) containing target tables.",
         )
 
@@ -142,11 +153,16 @@ with tab_source:
             st.error(f"Error discovering tables for schema '{selected_schema}': {e}")
 
     table_names = [t.name for t in available_tables]
+    table_options = table_names if table_names else [settings.default_table]
+    table_default_idx = (
+        table_options.index(settings.default_table.upper()) if settings.default_table.upper() in table_options else 0
+    )
 
     with col_table:
         selected_table = st.selectbox(
             "Select Table or View",
-            options=table_names if table_names else ["EMPLOYEES"],
+            options=table_options,
+            index=table_default_idx,
             help="Target table or view for extraction.",
         )
 

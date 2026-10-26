@@ -68,6 +68,7 @@ def test_connection_test_failure_handling(monkeypatch):
         oracle_user="bad_user",
         oracle_password="bad_password",
         oracle_dsn="unreachable_host:1521/XEPDB1",
+        oracle_client_mode="thin",
     )
     mgr = OracleConnectionManager(settings)
 

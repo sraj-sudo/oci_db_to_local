@@ -38,10 +38,15 @@ class OracleConnectionManager:
         global _THICK_MODE_INITIALIZED
         if self.settings.oracle_client_mode == "thick" and not _THICK_MODE_INITIALIZED:
             try:
-                # Initialize thick mode with default Oracle Client location or system libraries
-                oracledb.init_oracle_client()
+                # Initialize thick mode with specified or default Oracle Client location
+                lib_dir = self.settings.oracle_client_lib_dir
+                if lib_dir:
+                    oracledb.init_oracle_client(lib_dir=str(lib_dir))
+                    logger.info("Initialized Oracle Database Thick Client mode with lib_dir=%s", lib_dir)
+                else:
+                    oracledb.init_oracle_client()
+                    logger.info("Initialized Oracle Database Thick Client mode")
                 _THICK_MODE_INITIALIZED = True
-                logger.info("Initialized Oracle Database Thick Client mode")
             except Exception as exc:
                 logger.error("Failed to initialize Oracle Thick mode: %s", exc)
                 raise RuntimeError(

@@ -51,19 +51,21 @@ class OracleMetadataService:
     def list_schemas(conn: oracledb.Connection) -> list[str]:
         """Discover database schemas accessible to the current user."""
         sql = """
-            SELECT DISTINCT OWNER
-            FROM (
-                SELECT OWNER FROM ALL_TABLES
-                UNION ALL
-                SELECT OWNER FROM ALL_VIEWS
-            )
-            ORDER BY OWNER
+            SELECT USERNAME AS OWNER
+            FROM ALL_USERS
+            ORDER BY USERNAME
         """
         schemas: list[str] = []
         with conn.cursor() as cursor:
-            cursor.execute(sql)
-            for (owner,) in cursor:
-                schemas.append(owner)
+            try:
+                cursor.execute(sql)
+                for (owner,) in cursor:
+                    schemas.append(owner)
+            except Exception:
+                # Fallback to ALL_TABLES if ALL_USERS is restricted
+                cursor.execute("SELECT DISTINCT OWNER FROM ALL_TABLES ORDER BY OWNER")
+                for (owner,) in cursor:
+                    schemas.append(owner)
 
         logger.debug("Discovered %d accessible schemas", len(schemas))
         return schemas

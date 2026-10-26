@@ -24,6 +24,10 @@ class Settings(BaseSettings):
         default="thin",
         description="Oracle client mode: 'thin' (default pure Python) or 'thick'",
     )
+    oracle_client_lib_dir: str | None = Field(
+        default=None,
+        description="Path to Oracle Instant Client directory for Thick driver mode",
+    )
     oracle_wallet_location: str | None = Field(
         default=None,
         description="Path to Oracle Autonomous Database wallet directory",
@@ -31,6 +35,20 @@ class Settings(BaseSettings):
     oracle_wallet_password: str | None = Field(
         default=None,
         description="Password for Oracle cwallet.sso / ewallet.p12 if encrypted",
+    )
+
+    # Django-compatible aliases
+    db_host: str | None = Field(default=None, description="Database host")
+    db_port: int | None = Field(default=None, description="Database port")
+    db_name: str | None = Field(default=None, description="Database service name / SID")
+    db_user: str | None = Field(default=None, description="Database username")
+    db_password: str | None = Field(default=None, description="Database password")
+
+    # Prototype target defaults
+    default_schema: str = Field(default="PRODICS", description="Default selected schema")
+    default_table: str = Field(
+        default="XXFMICS_MTL_SYSTEM_ITEMS_STG",
+        description="Default selected table",
     )
 
     # Export & Execution Defaults
@@ -73,6 +91,24 @@ class Settings(BaseSettings):
             if val in {"zstd", "snappy", "gzip", "none"}:
                 return val
         return "zstd"
+
+    @classmethod
+    def _apply_fallbacks(cls, data: dict) -> dict:
+        """Fallback to Django-style DB_* environment variables if ORACLE_* is unset."""
+        if not data.get("oracle_user") and data.get("db_user"):
+            data["oracle_user"] = data["db_user"]
+        if not data.get("oracle_password") and data.get("db_password"):
+            data["oracle_password"] = data["db_password"]
+        if not data.get("oracle_dsn") and data.get("db_host") and data.get("db_name"):
+            port = data.get("db_port") or 1521
+            data["oracle_dsn"] = f"{data['db_host']}:{port}/{data['db_name']}"
+        return data
+
+    @classmethod
+    def model_validate(cls, obj, *args, **kwargs):
+        if isinstance(obj, dict):
+            obj = cls._apply_fallbacks(obj)
+        return super().model_validate(obj, *args, **kwargs)
 
     @property
     def is_configured(self) -> bool:
