@@ -48,6 +48,7 @@ class SafeQueryBuilder:
         columns: list[str],
         limit: int | None = None,
         valid_columns: list[str] | None = None,
+        order_by: list[str] | str | None = None,
     ) -> tuple[str, dict]:
         """Construct a validated SELECT query.
 
@@ -57,6 +58,7 @@ class SafeQueryBuilder:
             columns: List of column names to select (in user-requested order).
             limit: Optional maximum row count to fetch.
             valid_columns: Optional whitelist of known columns from metadata.
+            order_by: Optional column name or list of columns to order by (e.g. index/PK).
 
         Returns:
             Tuple of (SQL statement with bind variables, bind parameters dictionary).
@@ -84,6 +86,12 @@ class SafeQueryBuilder:
 
         params: dict = {}
         sql = f"SELECT {columns_clause} FROM {from_clause}"
+
+        # Safe ORDER BY clause
+        if order_by:
+            order_cols = [order_by] if isinstance(order_by, str) else order_by
+            quoted_order = [cls.quote_identifier(cls.validate_identifier(oc)) for oc in order_cols]
+            sql += f" ORDER BY {', '.join(quoted_order)}"
 
         if limit is not None and limit > 0:
             sql += " FETCH FIRST :row_limit ROWS ONLY"

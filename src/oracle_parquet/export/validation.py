@@ -33,6 +33,7 @@ class ValidationResult:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     checks: dict[str, bool] = field(default_factory=dict)
+    sample_rows_preview: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert validation result to dictionary suitable for JSON serialization."""
@@ -43,6 +44,7 @@ class ValidationResult:
             "errors": self.errors,
             "warnings": self.warnings,
             "checks": self.checks,
+            "sample_rows_preview": self.sample_rows_preview,
         }
 
 
@@ -56,6 +58,7 @@ class ExportValidator:
         expected_rows: int,
         expected_schema: pa.Schema,
         expected_columns: list[str],
+        order_by: list[str] | str | None = None,
     ) -> ValidationResult:
         """Execute comprehensive validation suite on an export directory."""
         dir_path = Path(export_directory)
@@ -176,10 +179,55 @@ class ExportValidator:
                 # Verify row counts
                 actual_total_rows += parquet_file.metadata.num_rows
 
-                # Round-trip read first record batch to ensure data integrity
+                # Row-wise integrity verification:
+                # 1. Check all row groups to ensure every column chunk contains exactly rg.num_rows
+                for rg_idx in range(parquet_file.metadata.num_row_groups):
+                    rg_meta = parquet_file.metadata.row_group(rg_idx)
+                    rg_rows = rg_meta.num_rows
+                    for col_idx in range(rg_meta.num_columns):
+                        col_chunk = rg_meta.column(col_idx)
+                        if col_chunk.num_values != rg_rows:
+                            result.errors.append(
+                                f"Row-column alignment violation in '{fname}' row group {rg_idx}, column {col_idx}: "
+                                f"expected {rg_rows} values, found {col_chunk.num_values}"
+                            )
+                            result.status = ValidationStatus.FAILED
+
+                # 2. Round-trip read first record batch to ensure row-level data integrity
                 if parquet_file.metadata.num_rows > 0:
                     tbl = parquet_file.read_row_group(0)
                     assert len(tbl) > 0
+
+                    # Reconstruct row records and verify strict column key ordering
+                    sample_batch = tbl.slice(0, min(50, len(tbl))).to_pylist()
+                    for r_idx, row_dict in enumerate(sample_batch[:5]):
+                        if list(row_dict.keys()) != expected_columns:
+                            result.errors.append(
+                                f"Row-wise key mismatch in '{fname}' at row {r_idx}: "
+                                f"got {list(row_dict.keys())}, expected {expected_columns}"
+                            )
+                            result.status = ValidationStatus.FAILED
+                            break
+
+                    # Preserve first 5 rows for sample preview in manifest / UI
+                    if not result.sample_rows_preview and sample_batch:
+                        result.sample_rows_preview = sample_batch[:5]
+
+                    # 3. Check deterministic ordering if order_by / primary key was used
+                    if order_by:
+                        sort_col = order_by if isinstance(order_by, str) else order_by[0]
+                        clean_col = sort_col.strip('"').upper()
+                        matching_col = next((c for c in expected_columns if c.upper() == clean_col), None)
+                        if matching_col and matching_col in tbl.column_names:
+                            col_vals = [v for v in tbl.column(matching_col).to_pylist() if v is not None]
+                            if col_vals:
+                                is_sorted = all(col_vals[i] <= col_vals[i + 1] for i in range(len(col_vals) - 1))
+                                if is_sorted:
+                                    result.checks["row_order_verified"] = True
+                                else:
+                                    result.warnings.append(
+                                        f"Sort column '{matching_col}' in '{fname}' was not strictly non-decreasing"
+                                    )
 
             except Exception as read_err:
                 result.errors.append(f"Failed to read parquet file '{fname}': {read_err}")
@@ -189,6 +237,9 @@ class ExportValidator:
         result.checks["files_readable"] = not any("read parquet file" in e for e in result.errors)
         result.checks["checksums_match"] = not any("checksum mismatch" in e for e in result.errors)
         result.checks["sizes_match"] = not any("size mismatch" in e for e in result.errors)
+        result.checks["row_wise_integrity"] = not any(
+            "Row-column alignment" in e or "Row-wise key mismatch" in e for e in result.errors
+        )
 
         # Check 5: Total row count matches extraction count
         if actual_total_rows != expected_rows:

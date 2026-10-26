@@ -41,6 +41,7 @@ class OracleBatchReader:
         batch_size: int = 50000,
         row_limit: int | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
+        order_by: list[str] | str | None = None,
     ) -> None:
         self.connection_manager = connection_manager
         self.schema = schema.strip().upper()
@@ -49,6 +50,8 @@ class OracleBatchReader:
         self.batch_size = max(100, batch_size)
         self.row_limit = row_limit
         self.progress_callback = progress_callback
+        self.order_by = order_by
+        self.effective_order_by: list[str] | str | None = None
 
     def read_batches(
         self,
@@ -88,6 +91,15 @@ class OracleBatchReader:
             # 2. Build Arrow Schema
             arrow_schema, warnings = OracleTypeMapper.build_arrow_schema(selected_metadata)
 
+            # Auto-detect Primary Key for deterministic row-wise ordering if not specified
+            effective_order_by = self.order_by
+            if not effective_order_by:
+                pk_cols = [c.name for c in selected_metadata if c.is_primary_key]
+                if pk_cols:
+                    effective_order_by = pk_cols
+                    logger.info("Auto-selected Primary Key %s for deterministic row-wise ordering", effective_order_by)
+            self.effective_order_by = effective_order_by
+
             # 3. Build safe query
             sql, params = SafeQueryBuilder.build_select_query(
                 schema=self.schema,
@@ -95,6 +107,7 @@ class OracleBatchReader:
                 columns=[col.name for col in selected_metadata],
                 limit=self.row_limit,
                 valid_columns=[col.name for col in all_cols],
+                order_by=self.effective_order_by,
             )
             logger.info("Executing extraction SQL: %s with params %s", sql, params)
 
@@ -145,6 +158,7 @@ class OracleBatchReader:
         columns_meta: list[ColumnMetadata],
     ) -> pa.RecordBatch:
         """Convert a list of tuple rows into a typed PyArrow RecordBatch."""
+        num_rows = len(rows)
         num_cols = len(columns_meta)
         columns_data: list[list] = [[] for _ in range(num_cols)]
 
@@ -155,10 +169,14 @@ class OracleBatchReader:
                 sanitized = OracleTypeMapper.sanitize_value_for_arrow(val, arrow_type)
                 columns_data[i].append(sanitized)
 
-        # Build PyArrow arrays with explicit type enforcement
+        # Build PyArrow arrays with explicit type enforcement and row-length assertion
         arrow_arrays: list[pa.Array] = []
         for i, col_data in enumerate(columns_data):
             field = schema.field(i)
+            if len(col_data) != num_rows:
+                raise ValueError(
+                    f"Row-wise alignment error in column '{field.name}': expected {num_rows} elements, got {len(col_data)}"
+                )
             try:
                 arr = pa.array(col_data, type=field.type)
             except Exception as arr_err:
@@ -170,6 +188,10 @@ class OracleBatchReader:
                 )
                 # Fallback to string or safe array representation
                 arr = pa.array([str(x) if x is not None else None for x in col_data], type=pa.string())
+            if len(arr) != num_rows:
+                raise ValueError(
+                    f"Arrow array length mismatch for column '{field.name}': expected {num_rows}, got {len(arr)}"
+                )
             arrow_arrays.append(arr)
 
         return pa.RecordBatch.from_arrays(arrow_arrays, schema=schema)

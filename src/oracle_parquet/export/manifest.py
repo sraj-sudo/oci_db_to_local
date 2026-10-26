@@ -1,7 +1,7 @@
 """Export manifest generation containing metadata, checksums, and validation results."""
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -44,6 +44,7 @@ class ExportManifest:
     validation_results: dict[str, Any]
     conversion_warnings: list[dict[str, str]]
     extraction_duration_seconds: float
+    database_indexes: list[dict[str, Any]] = field(default_factory=list)
     application_version: str = __version__
 
     def to_json(self, indent: int = 2) -> str:
@@ -71,6 +72,7 @@ class ManifestGenerator:
         conversion_warnings: list[ConversionWarning],
         duration_seconds: float,
         compression_type: str,
+        database_indexes: list[dict[str, Any]] | None = None,
     ) -> Path:
         """Construct manifest dataclass, serialize to manifest.json, and write to disk."""
         target_dir = Path(output_directory)
@@ -115,6 +117,7 @@ class ManifestGenerator:
             validation_results=validation_results,
             conversion_warnings=warnings_dict,
             extraction_duration_seconds=round(duration_seconds, 3),
+            database_indexes=database_indexes or [],
         )
 
         with open(manifest_path, "w", encoding="utf-8") as f:

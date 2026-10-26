@@ -68,6 +68,7 @@ class ExportService:
         max_rows_per_file: int = 100_000,
         output_base_dir: Path | None = None,
         create_zip: bool = False,
+        order_by: list[str] | str | None = None,
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> ExportJobResult:
         """Execute end-to-end export workflow with strict error handling and validation."""
@@ -96,8 +97,28 @@ class ExportService:
         warnings: list[ConversionWarning] = []
         file_summaries: list[ExportFileSummary] = []
         total_rows = 0
+        db_indexes_dict: list[dict] = []
 
         try:
+            # Discover database indexes for manifest lineage
+            with self.connection_manager.get_connection() as conn:
+                from oracle_parquet.db.metadata import OracleMetadataService
+
+                tbl_indexes = OracleMetadataService.get_table_indexes(conn, schema, table)
+                db_indexes_dict = [
+                    {
+                        "index_name": idx.index_name,
+                        "uniqueness": idx.uniqueness,
+                        "index_type": idx.index_type,
+                        "is_primary_key": idx.is_primary_key,
+                        "columns": [
+                            {"column_name": ic.column_name, "position": ic.column_position, "descend": ic.descend}
+                            for ic in idx.columns
+                        ],
+                    }
+                    for idx in tbl_indexes
+                ]
+
             reader = OracleBatchReader(
                 connection_manager=self.connection_manager,
                 schema=schema,
@@ -105,6 +126,7 @@ class ExportService:
                 columns=columns,
                 batch_size=actual_batch_size,
                 row_limit=row_limit,
+                order_by=order_by,
                 progress_callback=lambda r, b: (
                     progress_callback(r, b, f"Extracting batch {b} ({r:,} rows)") if progress_callback else None
                 ),
@@ -176,16 +198,18 @@ class ExportService:
                 conversion_warnings=warnings,
                 duration_seconds=duration,
                 compression_type=actual_compression,
+                database_indexes=db_indexes_dict,
             )
 
             # Run comprehensive validation
             if progress_callback:
-                progress_callback(total_rows, 0, "Validating exported files and checksums...")
+                progress_callback(total_rows, 0, "Validating exported files, row-wise integrity, and checksums...")
             validation = ExportValidator.validate_export(
                 export_directory=job_dir,
                 expected_rows=total_rows,
                 expected_schema=arrow_schema,
                 expected_columns=columns,
+                order_by=reader.effective_order_by if reader else order_by,
             )
 
             final_status = "COMPLETED" if validation.status == ValidationStatus.PASSED else validation.status.value
@@ -206,6 +230,7 @@ class ExportService:
                 conversion_warnings=warnings,
                 duration_seconds=duration,
                 compression_type=actual_compression,
+                database_indexes=db_indexes_dict,
             )
 
             # Create ZIP bundle if requested
