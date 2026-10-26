@@ -4,8 +4,8 @@ import time
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 
-import oracledb
 import pyarrow as pa
+from sqlalchemy import text
 
 from oracle_parquet.db.connection import OracleConnectionManager
 from oracle_parquet.db.metadata import ColumnMetadata, OracleMetadataService
@@ -69,9 +69,6 @@ class OracleBatchReader:
         batch_index = 0
 
         with self.connection_manager.get_connection() as conn:
-            # Optimize driver behavior for streaming LOBs and memory
-            conn.outputtypehandler = self._lob_output_type_handler
-
             # 1. Discover and validate columns against metadata
             all_cols = OracleMetadataService.get_columns(conn, self.schema, self.table)
             if not all_cols:
@@ -109,27 +106,29 @@ class OracleBatchReader:
                 valid_columns=[col.name for col in all_cols],
                 order_by=self.effective_order_by,
             )
-            logger.info("Executing extraction SQL: %s with params %s", sql, params)
+            logger.info("Executing extraction SQL via SQLAlchemy: %s with params %s", sql, params)
 
-            with conn.cursor() as cursor:
-                cursor.arraysize = self.batch_size
-                cursor.execute(sql, params)
+            stmt = text(sql).execution_options(yield_per=self.batch_size)
+            result = conn.execute(stmt, params)
 
-                # Fetch and yield in bounded batches
-                while True:
-                    rows = cursor.fetchmany(self.batch_size)
-                    if not rows:
-                        break
+            # Fetch and yield in bounded batches via SQLAlchemy Result
+            while True:
+                rows = result.fetchmany(self.batch_size)
+                if not rows:
+                    break
 
-                    # Convert rows to Arrow RecordBatch
-                    batch = self._convert_rows_to_batch(rows, arrow_schema, selected_metadata)
-                    total_rows += len(rows)
-                    batch_index += 1
+                # Convert Row objects to raw tuples
+                tuple_rows = [tuple(r) for r in rows]
 
-                    if self.progress_callback:
-                        self.progress_callback(total_rows, batch_index)
+                # Convert rows to Arrow RecordBatch
+                batch = self._convert_rows_to_batch(tuple_rows, arrow_schema, selected_metadata)
+                total_rows += len(rows)
+                batch_index += 1
 
-                    yield batch, arrow_schema, warnings
+                if self.progress_callback:
+                    self.progress_callback(total_rows, batch_index)
+
+                yield batch, arrow_schema, warnings
 
         duration = time.perf_counter() - start_time
         logger.info(
@@ -195,12 +194,3 @@ class OracleBatchReader:
             arrow_arrays.append(arr)
 
         return pa.RecordBatch.from_arrays(arrow_arrays, schema=schema)
-
-    @staticmethod
-    def _lob_output_type_handler(cursor, name, default_type, size, precision, scale):
-        """Instruct python-oracledb to return CLOB/BLOB as Python str/bytes directly."""
-        if default_type == oracledb.DB_TYPE_CLOB:
-            return cursor.var(oracledb.DB_TYPE_LONG, arraysize=cursor.arraysize)
-        if default_type == oracledb.DB_TYPE_BLOB:
-            return cursor.var(oracledb.DB_TYPE_LONG_RAW, arraysize=cursor.arraysize)
-        return None

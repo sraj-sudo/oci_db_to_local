@@ -71,10 +71,11 @@ class DataPreviewService:
                 valid_columns=[c.name for c in all_cols],
             )
 
-            with conn.cursor() as cursor:
-                cursor.arraysize = limit_clean
-                cursor.execute(sql, params)
-                rows = cursor.fetchmany(limit_clean)
+            from sqlalchemy import text
+
+            stmt = text(sql)
+            res = conn.execute(stmt, params)
+            rows = [tuple(r) for r in res.fetchmany(limit_clean)]
 
         # Build DataFrame and compute null counts
         col_names = [c.name for c in selected_meta]

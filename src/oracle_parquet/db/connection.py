@@ -1,10 +1,11 @@
-"""Oracle Database Connection Management supporting Thin and Thick modes."""
+"""Oracle Database Connection Management supporting SQLAlchemy Engine and Connections."""
 
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 import oracledb
+from sqlalchemy import Connection, Engine, create_engine, text
 
 from oracle_parquet.config import Settings, get_settings
 from oracle_parquet.logging_config import get_logger
@@ -27,10 +28,11 @@ class ConnectionStatus:
 
 
 class OracleConnectionManager:
-    """Manages creation, verification, and teardown of Oracle Database connections."""
+    """Manages creation, verification, and connection pooling via SQLAlchemy."""
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self._engine: Engine | None = None
         self._ensure_client_mode()
 
     def _ensure_client_mode(self) -> None:
@@ -38,7 +40,6 @@ class OracleConnectionManager:
         global _THICK_MODE_INITIALIZED
         if self.settings.oracle_client_mode == "thick" and not _THICK_MODE_INITIALIZED:
             try:
-                # Initialize thick mode with specified or default Oracle Client location
                 lib_dir = self.settings.oracle_client_lib_dir
                 if lib_dir:
                     oracledb.init_oracle_client(lib_dir=str(lib_dir))
@@ -54,52 +55,54 @@ class OracleConnectionManager:
                     f"are installed or switch to 'thin' mode: {exc}"
                 ) from exc
 
-    def _build_connection_params(self) -> dict:
-        """Construct connection parameters dict safely without leaking credentials in logs."""
-        params: dict = {
-            "user": self.settings.oracle_user,
-            "password": self.settings.oracle_password,
-            "dsn": self.settings.oracle_dsn,
-        }
-        if self.settings.oracle_wallet_location:
-            params["wallet_location"] = self.settings.oracle_wallet_location
-        if self.settings.oracle_wallet_password:
-            params["wallet_password"] = self.settings.oracle_wallet_password
+    def get_engine(self) -> Engine:
+        """Create or return the cached SQLAlchemy Engine instance."""
+        if self._engine is None:
+            thick_kwargs: dict = {}
+            if self.settings.oracle_client_mode == "thick":
+                lib_dir = self.settings.oracle_client_lib_dir
+                thick_kwargs["thick_mode"] = {"lib_dir": str(lib_dir)} if lib_dir else True
 
-        return params
+            connect_args: dict = {
+                "retry_count": 5,
+                "retry_delay": 1,
+                "tcp_connect_timeout": 5.0,
+                "expire_time": 2,
+            }
+            if self.settings.oracle_wallet_location:
+                connect_args["wallet_location"] = str(self.settings.oracle_wallet_location)
+            if self.settings.oracle_wallet_password:
+                connect_args["wallet_password"] = str(self.settings.oracle_wallet_password)
+
+            self._engine = create_engine(
+                self.settings.sqlalchemy_url,
+                pool_size=5,
+                max_overflow=10,
+                pool_pre_ping=True,
+                pool_recycle=3600,
+                connect_args=connect_args,
+                **thick_kwargs,
+            )
+            logger.info("Created SQLAlchemy Engine for Oracle DSN: %s", self.settings.safe_dsn)
+        return self._engine
 
     @contextmanager
-    def get_connection(self) -> Generator[oracledb.Connection, None, None]:
-        """Context manager providing a managed Oracle database connection."""
-        conn = None
+    def get_connection(self) -> Generator[Connection, None, None]:
+        """Context manager providing a managed SQLAlchemy Connection."""
+        engine = self.get_engine()
         try:
-            params = self._build_connection_params()
-            logger.debug(
-                "Connecting to Oracle DSN: %s as user: %s (mode: %s)",
-                self.settings.safe_dsn,
-                self.settings.oracle_user,
-                self.settings.oracle_client_mode,
-            )
-            conn = oracledb.connect(**params)
-            yield conn
+            with engine.connect() as conn:
+                yield conn
         except oracledb.Error as err:
-            (err_obj,) = err.args
-            clean_msg = err_obj.message if hasattr(err_obj, "message") else str(err)
-            logger.error("Oracle database error during connection: %s", clean_msg)
+            clean_msg = err.args[0].message if err.args and hasattr(err.args[0], "message") else str(err)
+            logger.error("Oracle database error: %s", clean_msg)
             raise ConnectionError(f"Oracle connection error: {clean_msg}") from err
         except Exception as exc:
-            logger.error("Unexpected error connecting to Oracle: %s", exc)
-            raise ConnectionError(f"Database connection failed: {exc}") from exc
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                    logger.debug("Oracle connection closed successfully")
-                except Exception as close_err:
-                    logger.warning("Error closing Oracle connection: %s", close_err)
+            logger.error("Unexpected database error: %s", exc)
+            raise ConnectionError(f"Database error: {exc}") from exc
 
     def test_connection(self) -> ConnectionStatus:
-        """Test database connection and retrieve banner / user verification."""
+        """Test database connection and retrieve banner / user verification via SQLAlchemy."""
         if not self.settings.is_configured:
             return ConnectionStatus(
                 success=False,
@@ -109,22 +112,18 @@ class OracleConnectionManager:
 
         try:
             with self.get_connection() as conn:
-                with conn.cursor() as cursor:
-                    # Query system banner and current user
-                    cursor.execute("SELECT banner FROM v$version WHERE ROWNUM = 1")
-                    row = cursor.fetchone()
-                    banner = row[0] if row else "Oracle Database"
+                banner_res = conn.execute(text("SELECT banner FROM v$version WHERE ROWNUM = 1")).scalar()
+                banner = banner_res or "Oracle Database"
 
-                    cursor.execute("SELECT USER FROM DUAL")
-                    user_row = cursor.fetchone()
-                    current_user = user_row[0] if user_row else self.settings.oracle_user
+                user_res = conn.execute(text("SELECT USER FROM DUAL")).scalar()
+                current_user = user_res or self.settings.oracle_user
 
-                    return ConnectionStatus(
-                        success=True,
-                        service_banner=banner,
-                        authenticated_user=current_user,
-                        client_mode=self.settings.oracle_client_mode,
-                    )
+                return ConnectionStatus(
+                    success=True,
+                    service_banner=banner,
+                    authenticated_user=current_user,
+                    client_mode=self.settings.oracle_client_mode,
+                )
         except ConnectionError as ce:
             return ConnectionStatus(
                 success=False,

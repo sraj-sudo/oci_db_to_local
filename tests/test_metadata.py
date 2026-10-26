@@ -22,9 +22,7 @@ def test_column_metadata_display_type():
 
 def test_list_schemas():
     mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-    mock_cursor.__iter__.return_value = [("HR",), ("SALES",), ("SYSTEM",)]
+    mock_conn.execute.return_value = [("HR",), ("SALES",), ("SYSTEM",)]
 
     schemas = OracleMetadataService.list_schemas(mock_conn)
     assert schemas == ["HR", "SALES", "SYSTEM"]
@@ -32,9 +30,7 @@ def test_list_schemas():
 
 def test_list_tables():
     mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-    mock_cursor.__iter__.return_value = [
+    mock_conn.execute.return_value = [
         ("EMPLOYEES", "TABLE", 107),
         ("EMP_DETAILS_VIEW", "VIEW", None),
     ]
@@ -47,11 +43,11 @@ def test_list_tables():
     assert tables[1].object_type == "VIEW"
 
 
-def test_get_columns_preserves_order():
+def test_get_columns_preserves_order(monkeypatch):
     mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-    mock_cursor.__iter__.return_value = [
+    monkeypatch.setattr(OracleMetadataService, "get_table_indexes", lambda conn, s, t: [])
+
+    mock_conn.execute.return_value = [
         ("COL_A", "VARCHAR2", 100, None, None, "N", 1),
         ("COL_B", "NUMBER", 22, 8, 0, "Y", 2),
         ("COL_C", "DATE", 7, None, None, "Y", 3),
@@ -72,10 +68,12 @@ def test_connection_test_failure_handling(monkeypatch):
     )
     mgr = OracleConnectionManager(settings)
 
-    def mock_connect(*args, **kwargs):
-        raise oracledb.DatabaseError("ORA-12541: Cannot connect. No listener at host unreachable_host")
+    mock_engine = MagicMock()
+    mock_engine.connect.side_effect = oracledb.DatabaseError(
+        "ORA-12541: Cannot connect. No listener at host unreachable_host"
+    )
+    monkeypatch.setattr(mgr, "get_engine", lambda: mock_engine)
 
-    monkeypatch.setattr(oracledb, "connect", mock_connect)
     status = mgr.test_connection()
     assert status.success is False
     assert "bad_password" not in (status.error_message or "")

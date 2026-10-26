@@ -127,6 +127,40 @@ class Settings(BaseSettings):
             return f"{user}:***@{rest}"
         return self.oracle_dsn
 
+    @property
+    def sqlalchemy_url(self):
+        """Construct a SQLAlchemy URL using oracle+oracledb dialect."""
+        from sqlalchemy import URL
+
+        host = self.db_host
+        port = self.db_port or 1521
+        service_name = self.db_name
+
+        if not host and self.oracle_dsn:
+            dsn = self.oracle_dsn.strip()
+            if "/" in dsn:
+                hp, service_name = dsn.split("/", 1)
+                if ":" in hp:
+                    host, port_str = hp.split(":", 1)
+                    port = int(port_str)
+                else:
+                    host = hp
+            else:
+                host = dsn
+
+        query: dict[str, str] = {}
+        if service_name:
+            query["service_name"] = service_name
+
+        return URL.create(
+            "oracle+oracledb",
+            username=self.oracle_user,
+            password=self.oracle_password,
+            host=host,
+            port=port,
+            query=query,
+        )
+
     def safe_dict(self) -> dict:
         """Return dictionary representation with sensitive attributes masked."""
         data = self.model_dump()

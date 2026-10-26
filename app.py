@@ -201,7 +201,8 @@ with tab_source:
     all_col_names = [c.name for c in columns_meta]
 
     # Action buttons for column selection
-    btn_col1, btn_col2, _ = st.columns([1, 1, 4])
+    proto_candidates = [c for c in ["ITEM_ID", "ITEM_CODE", "ITEM_DESC", "ITEM_LONG_DESC"] if c in all_col_names]
+    btn_col1, btn_col2, btn_col3, _ = st.columns([1.2, 1, 1.8, 2])
     with btn_col1:
         if st.button("Select All Columns", use_container_width=True):
             st.session_state.selected_columns = all_col_names.copy()
@@ -210,14 +211,27 @@ with tab_source:
         if st.button("Clear Selection", use_container_width=True):
             st.session_state.selected_columns = []
             st.rerun()
+    with btn_col3:
+        if proto_candidates and st.button(
+            "🎯 Prototype Columns",
+            use_container_width=True,
+            help="Select ITEM_ID, ITEM_CODE, ITEM_DESC, ITEM_LONG_DESC",
+        ):
+            st.session_state.selected_columns = proto_candidates.copy()
+            st.rerun()
+
+    # Determine smart default
+    default_selection = (
+        st.session_state.selected_columns
+        if st.session_state.selected_columns
+        else (proto_candidates if proto_candidates else (all_col_names[:5] if all_col_names else []))
+    )
 
     # Multiselect preserving order
     chosen_cols = st.multiselect(
         "Select Columns to Extract (Order preserved)",
-        options=all_col_names if all_col_names else ["EMPLOYEE_ID", "FIRST_NAME", "LAST_NAME", "SALARY", "HIRE_DATE"],
-        default=st.session_state.selected_columns
-        if st.session_state.selected_columns
-        else (all_col_names[:5] if all_col_names else []),
+        options=all_col_names if all_col_names else ["ITEM_ID", "ITEM_CODE", "ITEM_DESC", "ITEM_LONG_DESC"],
+        default=default_selection,
         help="Select one or more columns. The export will preserve this exact ordering.",
     )
     st.session_state.selected_columns = chosen_cols

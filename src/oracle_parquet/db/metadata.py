@@ -1,8 +1,8 @@
-"""Oracle database metadata discovery for schemas, tables, columns, and database indexes."""
+"""Database catalog metadata discovery service using SQLAlchemy."""
 
 from dataclasses import dataclass, field
 
-import oracledb
+from sqlalchemy import Connection, text
 
 from oracle_parquet.logging_config import get_logger
 
@@ -11,7 +11,7 @@ logger = get_logger("db.metadata")
 
 @dataclass(frozen=True)
 class IndexColumnMetadata:
-    """Detailed definition of a column within an index."""
+    """Metadata describing a column within an index."""
 
     column_name: str
     column_position: int
@@ -20,11 +20,11 @@ class IndexColumnMetadata:
 
 @dataclass(frozen=True)
 class TableIndexMetadata:
-    """Metadata describing a database index on a table or view."""
+    """Metadata describing a database index on a table."""
 
     index_name: str
-    uniqueness: str  # "UNIQUE" or "NONUNIQUE"
-    index_type: str  # "NORMAL", "BITMAP", etc.
+    uniqueness: str
+    index_type: str
     is_primary_key: bool
     columns: list[IndexColumnMetadata] = field(default_factory=list)
 
@@ -35,7 +35,7 @@ class TableIndexMetadata:
 
 @dataclass(frozen=True)
 class ColumnMetadata:
-    """Detailed metadata for an individual table/view column."""
+    """Enriched metadata describing an Oracle database column."""
 
     name: str
     data_type: str
@@ -46,23 +46,27 @@ class ColumnMetadata:
     column_id: int
     is_primary_key: bool = False
     is_indexed: bool = False
-    index_names: tuple[str, ...] = ()
+    index_names: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def display_type(self) -> str:
-        """Formatted Oracle type with precision/scale or length."""
+        """User-friendly representation of the Oracle SQL data type."""
         dt = self.data_type.upper()
-        if self.data_precision is not None:
-            if self.data_scale is not None and self.data_scale > 0:
-                return f"{dt}({self.data_precision},{self.data_scale})"
-            return f"{dt}({self.data_precision})"
-        if self.data_length and dt in {"VARCHAR2", "CHAR", "RAW", "NVARCHAR2", "NCHAR"}:
-            return f"{dt}({self.data_length})"
+        if dt in {"NUMBER", "NUMERIC"}:
+            if self.data_precision is not None and self.data_scale is not None:
+                return f"NUMBER({self.data_precision},{self.data_scale})"
+            if self.data_precision is not None:
+                return f"NUMBER({self.data_precision})"
+            return "NUMBER"
+        if dt in {"VARCHAR2", "NVARCHAR2", "CHAR", "RAW"}:
+            if self.data_length:
+                return f"{dt}({self.data_length})"
+            return dt
         return dt
 
     @property
     def key_badge(self) -> str:
-        """Visual indicator of Primary Key or Database Index status."""
+        """Formatted badge for UI tables."""
         if self.is_primary_key:
             return "🔑 Primary Key"
         if self.is_indexed:
@@ -72,19 +76,19 @@ class ColumnMetadata:
 
 @dataclass(frozen=True)
 class TableMetadata:
-    """Metadata for an accessible Oracle table or view."""
+    """Metadata describing a database table or view."""
 
     schema: str
     name: str
-    object_type: str  # "TABLE" or "VIEW"
+    object_type: str = "TABLE"
     num_rows: int | None = None
 
 
 class OracleMetadataService:
-    """Discovers accessible schemas, tables, views, column attributes, and database indexes."""
+    """Discovers accessible schemas, tables, views, column attributes, and database indexes via SQLAlchemy."""
 
     @staticmethod
-    def list_schemas(conn: oracledb.Connection) -> list[str]:
+    def list_schemas(conn: Connection) -> list[str]:
         """Discover database schemas accessible to the current user."""
         sql = """
             SELECT USERNAME AS OWNER
@@ -92,21 +96,20 @@ class OracleMetadataService:
             ORDER BY USERNAME
         """
         schemas: list[str] = []
-        with conn.cursor() as cursor:
-            try:
-                cursor.execute(sql)
-                for (owner,) in cursor:
-                    schemas.append(owner)
-            except Exception:
-                cursor.execute("SELECT DISTINCT OWNER FROM ALL_TABLES ORDER BY OWNER")
-                for (owner,) in cursor:
-                    schemas.append(owner)
+        try:
+            res = conn.execute(text(sql))
+            for row in res:
+                schemas.append(row[0])
+        except Exception:
+            res = conn.execute(text("SELECT DISTINCT OWNER FROM ALL_TABLES ORDER BY OWNER"))
+            for row in res:
+                schemas.append(row[0])
 
         logger.debug("Discovered %d accessible schemas", len(schemas))
         return schemas
 
     @staticmethod
-    def list_tables(conn: oracledb.Connection, schema: str) -> list[TableMetadata]:
+    def list_tables(conn: Connection, schema: str) -> list[TableMetadata]:
         """Retrieve all tables and views belonging to the given schema."""
         sql = """
             SELECT TABLE_NAME, 'TABLE' AS OBJECT_TYPE, NUM_ROWS
@@ -119,30 +122,28 @@ class OracleMetadataService:
             ORDER BY 1
         """
         results: list[TableMetadata] = []
-        with conn.cursor() as cursor:
-            cursor.execute(sql, {"schema": schema.upper()})
-            for table_name, obj_type, num_rows in cursor:
-                results.append(
-                    TableMetadata(
-                        schema=schema.upper(),
-                        name=table_name,
-                        object_type=obj_type,
-                        num_rows=num_rows,
-                    )
+        res = conn.execute(text(sql), {"schema": schema.upper()})
+        for row in res:
+            results.append(
+                TableMetadata(
+                    schema=schema.upper(),
+                    name=row[0],
+                    object_type=row[1],
+                    num_rows=row[2],
                 )
+            )
 
         logger.debug("Discovered %d tables/views in schema %s", len(results), schema)
         return results
 
     @classmethod
-    def get_table_indexes(cls, conn: oracledb.Connection, schema: str, table: str) -> list[TableIndexMetadata]:
+    def get_table_indexes(cls, conn: Connection, schema: str, table: str) -> list[TableIndexMetadata]:
         """Discover database indexes and primary key constraints for the specified table."""
         schema_clean = schema.strip().upper()
         table_clean = table.strip().upper()
 
         # 1. Discover Primary Key constraint name and columns
         pk_constraint_names: set[str] = set()
-        pk_columns: set[str] = set()
         pk_sql = """
             SELECT c.CONSTRAINT_NAME, cc.COLUMN_NAME
             FROM ALL_CONSTRAINTS c
@@ -154,14 +155,12 @@ class OracleMetadataService:
               AND c.CONSTRAINT_TYPE = 'P'
             ORDER BY cc.POSITION
         """
-        with conn.cursor() as cur:
-            try:
-                cur.execute(pk_sql, {"schema": schema_clean, "table_name": table_clean})
-                for c_name, col_name in cur.fetchall():
-                    pk_constraint_names.add(c_name.upper())
-                    pk_columns.add(col_name.upper())
-            except Exception as e:
-                logger.warning("Could not query primary key constraints for %s.%s: %s", schema, table, e)
+        try:
+            pk_res = conn.execute(text(pk_sql), {"schema": schema_clean, "table_name": table_clean})
+            for c_name, _col_name in pk_res:
+                pk_constraint_names.add(c_name.upper())
+        except Exception as e:
+            logger.warning("Could not query primary key constraints for %s.%s: %s", schema, table, e)
 
         # 2. Discover Indexes
         indexes: list[TableIndexMetadata] = []
@@ -180,44 +179,41 @@ class OracleMetadataService:
             ORDER BY COLUMN_POSITION
         """
 
-        with conn.cursor() as cur:
-            try:
-                cur.execute(idx_sql, {"schema": schema_clean, "table_name": table_clean})
-                idx_rows = cur.fetchall()
+        try:
+            idx_rows = conn.execute(text(idx_sql), {"schema": schema_clean, "table_name": table_clean}).fetchall()
 
-                for idx_name, uniqueness, idx_type in idx_rows:
-                    is_pk = (idx_name.upper() in pk_constraint_names) or (
-                        uniqueness == "UNIQUE" and any(idx_name.upper().endswith(s) for s in ["_PK", "PK"])
+            for idx_name, uniqueness, idx_type in idx_rows:
+                is_pk = (idx_name.upper() in pk_constraint_names) or (
+                    uniqueness == "UNIQUE" and any(idx_name.upper().endswith(s) for s in ["_PK", "PK"])
+                )
+
+                col_res = conn.execute(text(col_sql), {"schema": schema_clean, "index_name": idx_name})
+                ind_cols = [
+                    IndexColumnMetadata(
+                        column_name=c_name,
+                        column_position=pos,
+                        descend=desc or "ASC",
                     )
+                    for c_name, pos, desc in col_res
+                ]
 
-                    with conn.cursor() as col_cur:
-                        col_cur.execute(col_sql, {"schema": schema_clean, "index_name": idx_name})
-                        ind_cols = [
-                            IndexColumnMetadata(
-                                column_name=c_name,
-                                column_position=pos,
-                                descend=desc or "ASC",
-                            )
-                            for c_name, pos, desc in col_cur.fetchall()
-                        ]
-
-                    indexes.append(
-                        TableIndexMetadata(
-                            index_name=idx_name,
-                            uniqueness=uniqueness,
-                            index_type=idx_type,
-                            is_primary_key=is_pk,
-                            columns=ind_cols,
-                        )
+                indexes.append(
+                    TableIndexMetadata(
+                        index_name=idx_name,
+                        uniqueness=uniqueness,
+                        index_type=idx_type,
+                        is_primary_key=is_pk,
+                        columns=ind_cols,
                     )
-            except Exception as e:
-                logger.warning("Could not query table indexes for %s.%s: %s", schema, table, e)
+                )
+        except Exception as e:
+            logger.warning("Could not query table indexes for %s.%s: %s", schema, table, e)
 
         logger.info("Discovered %d database indexes on %s.%s", len(indexes), schema_clean, table_clean)
         return indexes
 
     @classmethod
-    def get_columns(cls, conn: oracledb.Connection, schema: str, table: str) -> list[ColumnMetadata]:
+    def get_columns(cls, conn: Connection, schema: str, table: str) -> list[ColumnMetadata]:
         """Retrieve column definitions, enriched with Primary Key and Index status."""
         schema_clean = schema.upper()
         table_clean = table.upper()
@@ -248,27 +244,35 @@ class OracleMetadataService:
             ORDER BY COLUMN_ID
         """
         columns: list[ColumnMetadata] = []
-        with conn.cursor() as cursor:
-            cursor.execute(sql, {"schema": schema_clean, "table_name": table_clean})
-            for col_name, dtype, length, precision, scale, nullable, col_id in cursor:
-                c_upper = col_name.upper()
-                idx_names = tuple(col_to_indexes.get(c_upper, []))
-                is_pk = c_upper in pk_cols
+        res = conn.execute(text(sql), {"schema": schema_clean, "table_name": table_clean})
+        for row in res:
+            col_name, dtype, length, precision, scale, nullable, col_id = (
+                row[0],
+                row[1],
+                row[2],
+                row[3],
+                row[4],
+                row[5],
+                row[6],
+            )
+            c_upper = col_name.upper()
+            idx_names = tuple(col_to_indexes.get(c_upper, []))
+            is_pk = c_upper in pk_cols
 
-                columns.append(
-                    ColumnMetadata(
-                        name=col_name,
-                        data_type=dtype,
-                        data_length=length,
-                        data_precision=precision,
-                        data_scale=scale,
-                        nullable=(nullable == "Y"),
-                        column_id=col_id or (len(columns) + 1),
-                        is_primary_key=is_pk,
-                        is_indexed=bool(idx_names),
-                        index_names=idx_names,
-                    )
+            columns.append(
+                ColumnMetadata(
+                    name=col_name,
+                    data_type=dtype,
+                    data_length=length,
+                    data_precision=precision,
+                    data_scale=scale,
+                    nullable=(nullable == "Y"),
+                    column_id=col_id or (len(columns) + 1),
+                    is_primary_key=is_pk,
+                    is_indexed=bool(idx_names),
+                    index_names=idx_names,
                 )
+            )
 
         logger.debug("Discovered %d columns for %s.%s", len(columns), schema, table)
         return columns
