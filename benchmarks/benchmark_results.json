@@ -1,0 +1,57 @@
+{
+  "benchmark_timestamp_utc": "2026-10-26T05:33:27.493459+00:00",
+  "application_version": "0.1.0",
+  "system": {
+    "os": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+    "cpu_count": 16,
+    "python_version": "3.12.14",
+    "pyarrow_version": "26.0.0"
+  },
+  "results": [
+    {
+      "row_count": 10000,
+      "batch_size": 50000,
+      "compression": "zstd",
+      "export_duration_s": 0.1825,
+      "validation_duration_s": 0.0067,
+      "total_duration_s": 0.1894,
+      "throughput_rows_per_sec": 54796.6,
+      "peak_memory_mb": 3.7,
+      "output_size_mb": 0.16,
+      "compression_ratio": 5.91,
+      "validation_status": "PASSED",
+      "oracle_live_extraction_measured": false,
+      "note": "Oracle extraction not measured due to absence of live database; synthetic streaming serialization tested."
+    },
+    {
+      "row_count": 100000,
+      "batch_size": 50000,
+      "compression": "zstd",
+      "export_duration_s": 1.5081,
+      "validation_duration_s": 0.0128,
+      "total_duration_s": 1.5209,
+      "throughput_rows_per_sec": 66309.3,
+      "peak_memory_mb": 22.57,
+      "output_size_mb": 1.55,
+      "compression_ratio": 6.26,
+      "validation_status": "PASSED",
+      "oracle_live_extraction_measured": false,
+      "note": "Oracle extraction not measured due to absence of live database; synthetic streaming serialization tested."
+    },
+    {
+      "row_count": 1000000,
+      "batch_size": 50000,
+      "compression": "zstd",
+      "export_duration_s": 14.2807,
+      "validation_duration_s": 0.0197,
+      "total_duration_s": 14.3005,
+      "throughput_rows_per_sec": 70024.5,
+      "peak_memory_mb": 22.62,
+      "output_size_mb": 15.49,
+      "compression_ratio": 6.33,
+      "validation_status": "PASSED",
+      "oracle_live_extraction_measured": false,
+      "note": "Oracle extraction not measured due to absence of live database; synthetic streaming serialization tested."
+    }
+  ]
+}
